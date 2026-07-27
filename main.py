@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 import re
 import logging
@@ -7,14 +8,12 @@ from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup,
     InlineKeyboardButton, ChatMemberUpdated
 )
-from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter, IS_MEMBER, IS_NOT_MEMBER
+from aiogram.filters import CommandStart
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest
 
-# Получаем токен из переменных окружения хостинга
+# Получаем токен
 TOKEN = os.getenv("BOT_TOKEN")
-
-# Защита от запуска без токена
 if not TOKEN:
     raise ValueError("Токен не найден! Укажите BOT_TOKEN в переменных окружения на хостинге.")
 
@@ -22,31 +21,61 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # ==========================================
-# 0. БАЗА ДАННЫХ И КЭШ (В ПАМЯТИ)
+# 0. БАЗА ДАННЫХ (СОХРАНЕНИЕ В ФАЙЛ JSON)
 # ==========================================
-chat_settings = {}
-known_chats = {}
+DATA_FILE = "bot_data.json"
+
+
+def load_db():
+    """Загружает данные из файла при запуске бота."""
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+# Глобальная переменная с базой данных
+db = load_db()
+
+
+def save_db():
+    """Сохраняет текущие данные в файл."""
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=4)
+
+
+def get_chat_data(chat_id: int) -> dict:
+    """Получает данные чата, создавая дефолтные, если их нет."""
+    chat_id_str = str(chat_id)  # JSON хранит ключи только как строки
+    if chat_id_str not in db:
+        db[chat_id_str] = {"title": "Неизвестный чат", "sticker_check": False}
+        save_db()
+    return db[chat_id_str]
 
 
 def get_chat_setting(chat_id: int, setting: str) -> bool:
-    if chat_id not in chat_settings:
-        # Изменено на False (по умолчанию выключено)
-        chat_settings[chat_id] = {"sticker_check": False}
-        # Изменено на False (по умолчанию выключено)
-    return chat_settings[chat_id].get(setting, False)
+    """Узнает статус настройки (по умолчанию отключена)."""
+    return get_chat_data(chat_id).get(setting, False)
 
 
 def toggle_chat_setting(chat_id: int, setting: str) -> bool:
-    if chat_id not in chat_settings:
-        # Изменено на False
-        chat_settings[chat_id] = {"sticker_check": False}
-    chat_settings[chat_id][setting] = not chat_settings[chat_id][setting]
-    return chat_settings[chat_id][setting]
+    """Переключает настройку и сохраняет в файл."""
+    chat_data = get_chat_data(chat_id)
+    chat_data[setting] = not chat_data.get(setting, False)
+    save_db()
+    return chat_data[setting]
 
 
 def update_known_chats(chat_id: int, title: str):
+    """Обновляет название чата в базе и сохраняет."""
     if chat_id < 0:
-        known_chats[chat_id] = title
+        chat_data = get_chat_data(chat_id)
+        if chat_data.get("title") != title:
+            chat_data["title"] = title
+            save_db()
 
 
 # ==========================================
@@ -57,7 +86,9 @@ async def track_bot_chats(event: ChatMemberUpdated):
     if event.new_chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
         update_known_chats(event.chat.id, event.chat.title)
     elif event.new_chat_member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
-        known_chats.pop(event.chat.id, None)
+        # Если бота удалили из группы, стираем ее из базы
+        db.pop(str(event.chat.id), None)
+        save_db()
 
 
 # ==========================================
@@ -66,7 +97,10 @@ async def track_bot_chats(event: ChatMemberUpdated):
 async def generate_chats_keyboard(user_id: int) -> InlineKeyboardMarkup:
     buttons = []
 
-    for chat_id, title in list(known_chats.items()):
+    # Проходимся по сохраненной базе данных
+    for chat_id_str, chat_info in list(db.items()):
+        chat_id = int(chat_id_str)
+        title = chat_info.get("title", "Неизвестный чат")
         try:
             member = await bot.get_chat_member(chat_id, user_id)
             if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
@@ -126,7 +160,9 @@ async def send_settings_menu(message_obj: Message, chat_id: int, user_id: int, e
 
     is_enabled = get_chat_setting(chat_id, "sticker_check")
     status_text = "ВКЛЮЧЕНА ✅" if is_enabled else "ОТКЛЮЧЕНА ❌"
-    chat_title = known_chats.get(chat_id, "Неизвестный чат")
+
+    chat_data = get_chat_data(chat_id)
+    chat_title = chat_data.get("title", "Неизвестный чат")
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"Стикеры: {status_text}", callback_data=f"toggle_sticker_{chat_id}")],
@@ -158,7 +194,7 @@ CHAR_MAP = {
     'o': 'о', '0': 'о', 'p': 'р', 't': 'т', 'x': 'х',
     'y': 'у', 'i': 'и', '1': 'и', '!': 'и', 'm': 'м'
 }
-FORBIDDEN_ROOTS = ['наркоти', 'мефедрон', 'кокаин', 'героин', 'гашиш', 'экстази', 'наркота']
+FORBIDDEN_ROOTS = ['наркоти', 'мефедрон', 'кокаин', 'героин', 'гашиш', 'экстази', 'наркота', 'нарката']
 
 
 def normalize_text(text: str) -> str:
@@ -185,7 +221,6 @@ checked_packs_cache = {}
 async def check_sticker(message: Message):
     update_known_chats(message.chat.id, message.chat.title)
 
-    # Теперь по умолчанию проверка будет отключена, пока админ не нажмет кнопку
     if not get_chat_setting(message.chat.id, "sticker_check"):
         return
     if not message.sticker.set_name:
@@ -211,7 +246,7 @@ async def check_sticker(message: Message):
     if has_ad:
         try:
             await message.delete()
-            warning = await message.answer(f"⚠️ {message.from_user.first_name}, возможно ваш стикер содержит рекламу!")
+            warning = await message.answer(f"⚠️ {message.from_user.first_name}, этот стикер содержит рекламу!")
             await asyncio.sleep(5)
             await warning.delete()
         except TelegramBadRequest:
@@ -225,22 +260,12 @@ async def moderate_message(message: Message):
     text_to_check = message.text or message.caption or ""
     if contains_forbidden(text_to_check):
         try:
-            # 1. Удаляем сообщение нарушителя
             await message.delete()
-
-            # 2. Отправляем предупреждение в чат
             warning = await message.answer(
-                f"⚠️ {message.from_user.first_name}, сообщение содержит запрещенные слова!"
-            )
-
-            # 3. Ждем 5 секунд
+                f"⚠️ {message.from_user.first_name}, сообщение содержит запрещенные слова!")
             await asyncio.sleep(5)
-
-            # 4. Удаляем предупреждение от бота
             await warning.delete()
-
         except Exception:
-            # Ошибка может возникнуть, если у бота нет прав администратора на удаление
             pass
 
 
