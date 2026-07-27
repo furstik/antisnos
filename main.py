@@ -176,7 +176,7 @@ def contains_forbidden(text: str) -> bool:
     return False
 
 
-WHITELIST = ["@kfgart", "@FurriStik", "t.me/kfgart"]
+WHITELIST = ["@kfgart", "@FurriStik", "t.me/kfgart", "@fyrporn", "@RA_FAIER"]
 LINK_PATTERN = re.compile(r'(?:@|t\.me/)([a-zA-Z0-9_]{4,})', re.IGNORECASE)
 checked_packs_cache = {}
 
